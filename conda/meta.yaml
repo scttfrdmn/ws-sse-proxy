@@ -6,8 +6,9 @@ package:
   version: {{ version }}
 
 source:
-  url: https://pypi.org/packages/source/w/{{ name }}/{{ name }}-{{ version }}.tar.gz
-  # sha256 will be added after first PyPI release
+  url: https://pypi.org/packages/source/w/{{ name }}/ws_sse_proxy-{{ version }}.tar.gz
+  # sha256: UPDATE after PyPI upload — run:
+  # curl -sL https://pypi.org/pypi/ws-sse-proxy/0.1.0/json | python -c "import sys,json; print(json.load(sys.stdin)['urls'][0]['digests']['sha256'])"
 
 build:
   noarch: python
