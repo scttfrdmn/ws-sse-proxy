@@ -1,1 +1,247 @@
-# Core proxy implementation (Starlette app)
+"""WebSocket-to-SSE translation proxy.
+
+A generic reverse proxy that translates WebSocket connections to
+SSE (Server-Sent Events) + HTTP POST for environments where WebSocket
+connections are blocked.
+
+This module is application-agnostic — it doesn't know or care what's
+behind the WebSocket. marimo, Streamlit, Bokeh, Dask dashboards, or
+any other WebSocket-dependent app will work.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import logging
+from typing import Optional
+
+import httpx
+import websockets.asyncio.client
+import websockets.exceptions
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import Response, StreamingResponse
+from starlette.routing import Route
+
+from .shim_js import SHIM_SCRIPT
+
+logger = logging.getLogger("ws_sse_proxy")
+
+
+class ConnectionPool:
+    """Manages active WebSocket connections keyed by shim ID."""
+
+    def __init__(self):
+        self._connections: dict[
+            str, websockets.asyncio.client.ClientConnection
+        ] = {}
+
+    async def open(
+        self, shim_id: str, ws_url: str
+    ) -> websockets.asyncio.client.ClientConnection:
+        ws = await websockets.asyncio.client.connect(
+            ws_url,
+            additional_headers={"Origin": "http://localhost"},
+            max_size=None,
+        )
+        self._connections[shim_id] = ws
+        return ws
+
+    def get(self, shim_id: str) -> Optional[
+        websockets.asyncio.client.ClientConnection
+    ]:
+        return self._connections.get(shim_id)
+
+    async def close(self, shim_id: str):
+        ws = self._connections.pop(shim_id, None)
+        if ws:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
+
+def create_proxy(
+    target_port: int,
+    target_host: str = "localhost",
+) -> Starlette:
+    """Create the ASGI proxy application.
+
+    Args:
+        target_port: Port the target application is listening on.
+        target_host: Host the target application is listening on.
+                     Defaults to localhost.
+
+    Returns:
+        A Starlette ASGI application.
+    """
+    target_http = f"http://{target_host}:{target_port}"
+    target_ws = f"ws://{target_host}:{target_port}"
+    pool = ConnectionPool()
+
+    async def sse_endpoint(request: Request) -> Response:
+        """SSE endpoint: opens WebSocket to target, streams back as events."""
+        shim_id = request.query_params.get("__wss_id")
+        if not shim_id:
+            return Response("Missing __wss_id", status_code=400)
+
+        # Build the target WebSocket URL, forwarding query params
+        params = {
+            k: v
+            for k, v in request.query_params.items()
+            if k != "__wss_id"
+        }
+        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        # The original WS path is encoded in the query params by the JS shim.
+        # The JS connects to /__wss/events with the same query string as
+        # the original ws:// URL, so we forward to /ws on the target.
+        ws_path = request.query_params.get("__wss_path", "/ws")
+        ws_url = f"{target_ws}{ws_path}"
+        if qs:
+            ws_url += f"?{qs}"
+
+        logger.info("SSE bridge: connecting to %s", ws_url)
+
+        try:
+            ws = await pool.open(shim_id, ws_url)
+        except Exception as e:
+            logger.error("Failed to connect to target WebSocket: %s", e)
+            return Response(
+                f"WebSocket connection failed: {e}", status_code=502
+            )
+
+        async def event_generator():
+            try:
+                async for message in ws:
+                    if isinstance(message, bytes):
+                        encoded = base64.b64encode(message).decode("ascii")
+                        yield f"event: binary\ndata: {encoded}\n\n"
+                    else:
+                        lines = message.split("\n")
+                        yield "data: " + "\ndata: ".join(lines) + "\n\n"
+            except websockets.exceptions.ConnectionClosed:
+                logger.info("Target WebSocket closed for %s", shim_id)
+                yield "event: close\ndata: connection closed\n\n"
+            except Exception as e:
+                logger.error("SSE bridge error: %s", e)
+                yield f"event: error\ndata: {e}\n\n"
+            finally:
+                await pool.close(shim_id)
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    async def send_endpoint(request: Request) -> Response:
+        """Receive a message from the browser and forward to target WebSocket."""
+        shim_id = request.query_params.get("__wss_id")
+        if not shim_id:
+            return Response("Missing __wss_id", status_code=400)
+
+        ws = pool.get(shim_id)
+        if not ws:
+            return Response("No active connection", status_code=404)
+
+        body = await request.body()
+        try:
+            await ws.send(body)
+            return Response("OK", status_code=200)
+        except Exception as e:
+            logger.error("Failed to send to target: %s", e)
+            return Response(f"Send failed: {e}", status_code=502)
+
+    async def close_endpoint(request: Request) -> Response:
+        """Close a shim connection."""
+        shim_id = request.query_params.get("__wss_id")
+        if shim_id:
+            await pool.close(shim_id)
+        return Response("OK", status_code=200)
+
+    async def proxy_handler(request: Request) -> Response:
+        """Reverse-proxy all other requests, injecting JS shim into HTML."""
+        path = request.url.path
+        query = str(request.url.query)
+        target_url = f"{target_http}{path}"
+        if query:
+            target_url += f"?{query}"
+
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.request(
+                    method=request.method,
+                    url=target_url,
+                    headers={
+                        k: v
+                        for k, v in request.headers.items()
+                        if k.lower()
+                        not in ("host", "connection", "transfer-encoding")
+                    },
+                    content=(
+                        await request.body()
+                        if request.method in ("POST", "PUT", "PATCH")
+                        else None
+                    ),
+                    follow_redirects=False,
+                    timeout=30.0,
+                )
+            except httpx.ConnectError:
+                return Response(
+                    "Target application not reachable", status_code=502
+                )
+
+        content_type = resp.headers.get("content-type", "")
+        body = resp.content
+
+        if "text/html" in content_type:
+            html = body.decode("utf-8", errors="replace")
+            injection_point = html.find("<script")
+            if injection_point == -1:
+                injection_point = html.find("</head>")
+            if injection_point != -1:
+                html = (
+                    html[:injection_point]
+                    + SHIM_SCRIPT
+                    + html[injection_point:]
+                )
+            else:
+                html = SHIM_SCRIPT + html
+            body = html.encode("utf-8")
+
+        excluded = {
+            "transfer-encoding",
+            "connection",
+            "content-encoding",
+            "content-length",
+        }
+        headers = {
+            k: v
+            for k, v in resp.headers.items()
+            if k.lower() not in excluded
+        }
+
+        return Response(
+            content=body,
+            status_code=resp.status_code,
+            headers=headers,
+        )
+
+    routes = [
+        Route("/__wss/events", sse_endpoint),
+        Route("/__wss/send", send_endpoint, methods=["POST"]),
+        Route("/__wss/close", close_endpoint, methods=["POST"]),
+        Route(
+            "/{path:path}",
+            proxy_handler,
+            methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+        ),
+        Route("/", proxy_handler),
+    ]
+
+    return Starlette(routes=routes)

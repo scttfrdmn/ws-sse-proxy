@@ -5,20 +5,39 @@ build-backend = "hatchling.build"
 [project]
 name = "ws-sse-proxy"
 version = "0.1.0"
-description = "Generic WebSocket-to-SSE proxy for running WebSocket apps behind restrictive HTTP proxies"
+description = "A drop-in proxy that translates WebSocket connections to SSE + HTTP POST, for environments where WebSocket is blocked"
 readme = "README.md"
-license = { text = "MIT" }
-requires-python = ">=3.8"
-dependencies = [
-    "starlette",
-    "uvicorn",
-    "httpx",
-    "httpx-ws",
+license = "MIT"
+requires-python = ">=3.9"
+authors = [
+    { name = "Scott Friedman", email = "scttfrdmn@gmail.com" },
 ]
-
-[project.scripts]
-ws-sse-proxy = "ws_sse_proxy.__main__:main"
+keywords = ["websocket", "sse", "server-sent-events", "proxy", "alb", "sagemaker", "jupyter"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: Proxy Servers",
+    "Topic :: Internet :: WWW/HTTP",
+]
+dependencies = [
+    "starlette>=0.27.0",
+    "websockets>=11.0",
+    "httpx>=0.24.0",
+    "uvicorn>=0.22.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/scttfrdmn/ws-sse-proxy"
+Issues = "https://github.com/scttfrdmn/ws-sse-proxy/issues"
 Repository = "https://github.com/scttfrdmn/ws-sse-proxy"
+
+[project.scripts]
+ws-sse-proxy = "ws_sse_proxy.__main__:main"
