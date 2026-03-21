@@ -102,7 +102,9 @@ SHIM_SCRIPT = """
       this._sseActive = true;
       this.readyState = ShimmedWebSocket.CONNECTING;
 
-      const sseUrl = `${shimBasePath}/__wss/events${this._queryString}&__wss_id=${this._shimId}`;
+      const wsUrl = new URL(this.url, window.location.origin);
+      const sep = this._queryString ? '&' : '?';
+      const sseUrl = `${shimBasePath}/__wss/events${this._queryString}${sep}__wss_id=${this._shimId}&__wss_path=${encodeURIComponent(wsUrl.pathname)}`;
 
       this._eventSource = new EventSource(sseUrl);
 
@@ -147,9 +149,13 @@ SHIM_SCRIPT = """
     send(data) {
       if (this._sseActive) {
         const sendUrl = `${shimBasePath}/__wss/send?__wss_id=${this._shimId}`;
+        // Use text/plain for strings (JSON, etc.) so the proxy sends a
+        // text frame.  Use octet-stream for binary (ArrayBuffer, Blob)
+        // so the proxy sends a binary frame.
+        const isBinary = data instanceof ArrayBuffer || data instanceof Blob;
         fetch(sendUrl, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/octet-stream' },
+          headers: { 'Content-Type': isBinary ? 'application/octet-stream' : 'text/plain; charset=utf-8' },
           body: data,
         }).catch(err => {
           console.error('[ws-sse-proxy] Failed to send message:', err);

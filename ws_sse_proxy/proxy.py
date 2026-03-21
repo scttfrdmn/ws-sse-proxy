@@ -11,7 +11,6 @@ any other WebSocket-dependent app will work.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import logging
 from typing import Optional
@@ -79,6 +78,10 @@ def create_proxy(
     target_http = f"http://{target_host}:{target_port}"
     target_ws = f"ws://{target_host}:{target_port}"
     pool = ConnectionPool()
+    # Shared HTTP client for proxying. trust_env=False prevents httpx
+    # from picking up system proxy env vars (ALL_PROXY, HTTP_PROXY,
+    # SOCKS proxy, etc.) — we're always connecting to a local target.
+    http_client = httpx.AsyncClient(trust_env=False, timeout=30.0)
 
     async def sse_endpoint(request: Request) -> Response:
         """SSE endpoint: opens WebSocket to target, streams back as events."""
@@ -87,16 +90,14 @@ def create_proxy(
             return Response("Missing __wss_id", status_code=400)
 
         # Build the target WebSocket URL, forwarding query params
+        # (but stripping the shim-internal __wss_* params)
+        ws_path = request.query_params.get("__wss_path", "/ws")
         params = {
             k: v
             for k, v in request.query_params.items()
-            if k != "__wss_id"
+            if not k.startswith("__wss_")
         }
         qs = "&".join(f"{k}={v}" for k, v in params.items())
-        # The original WS path is encoded in the query params by the JS shim.
-        # The JS connects to /__wss/events with the same query string as
-        # the original ws:// URL, so we forward to /ws on the target.
-        ws_path = request.query_params.get("__wss_path", "/ws")
         ws_url = f"{target_ws}{ws_path}"
         if qs:
             ws_url += f"?{qs}"
@@ -151,7 +152,18 @@ def create_proxy(
 
         body = await request.body()
         try:
-            await ws.send(body)
+            # Determine text vs binary from Content-Type header, falling
+            # back to UTF-8 decode attempt.  Most WebSocket messages from
+            # web apps (JSON) are text frames; sending them as binary will
+            # break servers that call receive_text().
+            content_type = request.headers.get("content-type", "")
+            if "octet-stream" in content_type:
+                await ws.send(body)
+            else:
+                try:
+                    await ws.send(body.decode("utf-8"))
+                except UnicodeDecodeError:
+                    await ws.send(body)
             return Response("OK", status_code=200)
         except Exception as e:
             logger.error("Failed to send to target: %s", e)
@@ -172,29 +184,27 @@ def create_proxy(
         if query:
             target_url += f"?{query}"
 
-        async with httpx.AsyncClient() as client:
-            try:
-                resp = await client.request(
-                    method=request.method,
-                    url=target_url,
-                    headers={
-                        k: v
-                        for k, v in request.headers.items()
-                        if k.lower()
-                        not in ("host", "connection", "transfer-encoding")
-                    },
-                    content=(
-                        await request.body()
-                        if request.method in ("POST", "PUT", "PATCH")
-                        else None
-                    ),
-                    follow_redirects=False,
-                    timeout=30.0,
-                )
-            except httpx.ConnectError:
-                return Response(
-                    "Target application not reachable", status_code=502
-                )
+        try:
+            resp = await http_client.request(
+                method=request.method,
+                url=target_url,
+                headers={
+                    k: v
+                    for k, v in request.headers.items()
+                    if k.lower()
+                    not in ("host", "connection", "transfer-encoding")
+                },
+                content=(
+                    await request.body()
+                    if request.method in ("POST", "PUT", "PATCH")
+                    else None
+                ),
+                follow_redirects=False,
+            )
+        except httpx.ConnectError:
+            return Response(
+                "Target application not reachable", status_code=502
+            )
 
         content_type = resp.headers.get("content-type", "")
         body = resp.content
