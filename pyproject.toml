@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ws-sse-proxy"
+version = "0.1.0"
+description = "Generic WebSocket-to-SSE proxy for running WebSocket apps behind restrictive HTTP proxies"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.8"
+dependencies = [
+    "starlette",
+    "uvicorn",
+    "httpx",
+    "httpx-ws",
+]
+
+[project.scripts]
+ws-sse-proxy = "ws_sse_proxy.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/scttfrdmn/ws-sse-proxy"
+Repository = "https://github.com/scttfrdmn/ws-sse-proxy"
