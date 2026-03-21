@@ -7,8 +7,7 @@ package:
 
 source:
   url: https://pypi.org/packages/source/w/{{ name }}/ws_sse_proxy-{{ version }}.tar.gz
-  # sha256: UPDATE after PyPI upload — run:
-  # curl -sL https://pypi.org/pypi/ws-sse-proxy/0.1.0/json | python -c "import sys,json; print(json.load(sys.stdin)['urls'][0]['digests']['sha256'])"
+  sha256: 7b4ca5caa1d36633c70ad3fe46b72dfce8dcc8f7cf1d17e1c0cabc2823195c8a
 
 build:
   noarch: python
