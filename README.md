@@ -1,5 +1,10 @@
 # ws-sse-proxy
 
+[![PyPI version](https://img.shields.io/pypi/v/ws-sse-proxy)](https://pypi.org/project/ws-sse-proxy/)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/ws-sse-proxy)](https://pypi.org/project/ws-sse-proxy/)
+[![conda-forge](https://img.shields.io/badge/conda--forge-pending-orange?logo=condaforge)](https://github.com/conda-forge/staged-recipes/pull/32681)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A drop-in reverse proxy that transparently translates WebSocket connections to SSE + HTTP POST, for environments where WebSocket is blocked.
 
 ## The Problem
