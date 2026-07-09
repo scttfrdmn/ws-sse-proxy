@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ws-sse-proxy"
-version = "0.1.0"
+version = "0.1.1"
 description = "A drop-in proxy that translates WebSocket connections to SSE + HTTP POST, for environments where WebSocket is blocked"
 readme = "README.md"
 license = "MIT"
@@ -41,3 +41,13 @@ Repository = "https://github.com/scttfrdmn/ws-sse-proxy"
 
 [project.scripts]
 ws-sse-proxy = "ws_sse_proxy.__main__:main"
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "anyio>=3.0",
+    "trio>=0.22",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

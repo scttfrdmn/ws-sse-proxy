@@ -117,6 +117,34 @@ All other paths are proxied to the target application. HTML responses get the Ja
 
 Dependencies: `starlette`, `websockets`, `httpx`, `uvicorn` — all pure Python, no compiled extensions required.
 
+## Development
+
+```bash
+# Install with test extras (using uv)
+uv pip install -e '.[test]'
+
+# Run the test suite
+pytest
+```
+
+The suite covers HTTP pass-through, JavaScript shim injection (including
+gzip-encoded HTML), and the SSE↔WebSocket bridge end-to-end against a live
+proxy+target stack — text and binary round-trips, query-parameter
+forwarding, and connection cleanup.
+
+## Changelog
+
+### 0.1.1
+
+- Fix: query parameters forwarded to the target WebSocket are now
+  percent-encoded. Values containing spaces, `&`, or `=` (e.g. auth tokens)
+  previously corrupted the WebSocket handshake.
+- Add: test suite.
+
+### 0.1.0
+
+- Initial release.
+
 ## License
 
 MIT

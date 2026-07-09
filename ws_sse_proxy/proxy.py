@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import logging
 from typing import Optional
+from urllib.parse import urlencode
 
 import httpx
 import websockets.asyncio.client
@@ -92,12 +93,12 @@ def create_proxy(
         # Build the target WebSocket URL, forwarding query params
         # (but stripping the shim-internal __wss_* params)
         ws_path = request.query_params.get("__wss_path", "/ws")
-        params = {
-            k: v
-            for k, v in request.query_params.items()
+        params = [
+            (k, v)
+            for k, v in request.query_params.multi_items()
             if not k.startswith("__wss_")
-        }
-        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        ]
+        qs = urlencode(params)
         ws_url = f"{target_ws}{ws_path}"
         if qs:
             ws_url += f"?{qs}"
