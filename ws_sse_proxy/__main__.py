@@ -70,7 +70,7 @@ def main():
         )
         sys.exit(1)
 
-    print(f"ws-sse-proxy v0.1.2")
+    print(f"ws-sse-proxy v0.1.3")
     print(f"  Listening on {args.host}:{args.listen_port}")
     print(f"  Proxying to {args.target_host}:{args.target_port}")
     print(f"  WebSocket fallback: SSE + HTTP POST")

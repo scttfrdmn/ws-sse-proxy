@@ -12,4 +12,4 @@ The proxy sits in front of your application and:
 - Maintains a real WebSocket to your app on localhost where it works fine
 """
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"

@@ -134,7 +134,7 @@ forwarding, and connection cleanup.
 
 ## Changelog
 
-### 0.1.2
+### 0.1.3
 
 - Fix ([#2](https://github.com/scttfrdmn/ws-sse-proxy/issues/2)): SSE
   fallback now works when the proxy is served under a sub-path prefix
