@@ -13,8 +13,6 @@ the full WebSocket API interface.
 SHIM_SCRIPT = """
 <script>
 (function() {
-  const shimBasePath = window.location.pathname.replace(/\\/ws(\\?.*)?$/, '');
-
   const OriginalWebSocket = window.WebSocket;
 
   class ShimmedWebSocket extends EventTarget {
@@ -30,6 +28,26 @@ SHIM_SCRIPT = """
       // Extract query params from the WS URL
       const wsUrl = new URL(url, window.location.origin);
       this._queryString = wsUrl.search;
+
+      // Derive the mount prefix (base path) so the /__wss/* endpoints resolve
+      // correctly even when the app is served under a sub-path prefix
+      // (jupyter-server-proxy, JupyterHub, SageMaker Studio, etc.). The page
+      // and its WebSocket share that prefix, so the longest common path-segment
+      // prefix of the two IS the mount. Stripping it from the WS path yields
+      // the app-relative path the proxy needs as __wss_path.
+      //   page: /jupyterlab/default/proxy/2719/     ws: /jupyterlab/.../2719/ws
+      //   -> base = /jupyterlab/default/proxy/2719   targetWsPath = /ws
+      // At the server root, base is '' and targetWsPath is the WS path as-is.
+      const pageSegs = window.location.pathname.split('/');
+      const wsSegs = wsUrl.pathname.split('/');
+      const max = Math.min(pageSegs.length, wsSegs.length);
+      const common = [];
+      for (let i = 0; i < max && pageSegs[i] === wsSegs[i]; i++) {
+        common.push(pageSegs[i]);
+      }
+      this._shimBasePath = common.join('/');
+      this._targetWsPath =
+        wsUrl.pathname.slice(this._shimBasePath.length) || '/';
 
       // Generate a unique ID for this connection
       this._shimId = crypto.randomUUID();
@@ -102,9 +120,8 @@ SHIM_SCRIPT = """
       this._sseActive = true;
       this.readyState = ShimmedWebSocket.CONNECTING;
 
-      const wsUrl = new URL(this.url, window.location.origin);
       const sep = this._queryString ? '&' : '?';
-      const sseUrl = `${shimBasePath}/__wss/events${this._queryString}${sep}__wss_id=${this._shimId}&__wss_path=${encodeURIComponent(wsUrl.pathname)}`;
+      const sseUrl = `${this._shimBasePath}/__wss/events${this._queryString}${sep}__wss_id=${this._shimId}&__wss_path=${encodeURIComponent(this._targetWsPath)}`;
 
       this._eventSource = new EventSource(sseUrl);
 
@@ -148,7 +165,7 @@ SHIM_SCRIPT = """
 
     send(data) {
       if (this._sseActive) {
-        const sendUrl = `${shimBasePath}/__wss/send?__wss_id=${this._shimId}`;
+        const sendUrl = `${this._shimBasePath}/__wss/send?__wss_id=${this._shimId}`;
         // Use text/plain for strings (JSON, etc.) so the proxy sends a
         // text frame.  Use octet-stream for binary (ArrayBuffer, Blob)
         // so the proxy sends a binary frame.
@@ -175,7 +192,7 @@ SHIM_SCRIPT = """
       this.readyState = ShimmedWebSocket.CLOSED;
 
       if (this._sseActive) {
-        fetch(`${shimBasePath}/__wss/close?__wss_id=${this._shimId}`, {
+        fetch(`${this._shimBasePath}/__wss/close?__wss_id=${this._shimId}`, {
           method: 'POST'
         }).catch(() => {});
       }

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ws-sse-proxy"
-version = "0.1.1"
+version = "0.1.2"
 description = "A drop-in proxy that translates WebSocket connections to SSE + HTTP POST, for environments where WebSocket is blocked"
 readme = "README.md"
 license = "MIT"

@@ -134,6 +134,15 @@ forwarding, and connection cleanup.
 
 ## Changelog
 
+### 0.1.2
+
+- Fix ([#2](https://github.com/scttfrdmn/ws-sse-proxy/issues/2)): SSE
+  fallback now works when the proxy is served under a sub-path prefix
+  (jupyter-server-proxy, JupyterHub, SageMaker Studio). The injected shim
+  previously assumed a root mount and requested `/__wss/*` at the wrong
+  path, causing a 404 retry loop. It now derives the mount prefix from the
+  page and WebSocket URLs and forwards the app-relative WebSocket path.
+
 ### 0.1.1
 
 - Fix: query parameters forwarded to the target WebSocket are now
