@@ -56,6 +56,17 @@ def _run_shim(page_path: str, ws_url: str) -> dict:
           addEventListener() {} close() {}
         };
         globalThis.EventSource.CLOSED = 2;
+        // CloseEvent is a universal browser global but only became a Node
+        // global in v23+. Stub it so the harness runs on older Node (CI).
+        if (typeof CloseEvent === 'undefined') {
+          globalThis.CloseEvent = class CloseEvent extends Event {
+            constructor(type, init = {}) {
+              super(type, init);
+              this.code = init.code; this.reason = init.reason;
+              this.wasClean = init.wasClean;
+            }
+          };
+        }
         globalThis.fetch = (url, opts) => {
           if (url.includes('/__wss/send')) captured.sendUrl = url;
           if (url.includes('/__wss/close')) captured.closeUrl = url;
