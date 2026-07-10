@@ -32,8 +32,24 @@ logger = logging.getLogger("ws_sse_proxy")
 # How often to wake up while waiting for the next upstream frame to check
 # whether the browser has disconnected. Small enough to tear the upstream
 # session down promptly (so a reload isn't demoted to kiosk), large enough
-# to avoid a busy loop on an idle connection.
+# to avoid a busy loop on an idle connection. Doubles as the SSE keepalive
+# interval: on each idle wakeup we emit a comment line so the stream keeps
+# producing bytes.
 DISCONNECT_POLL_SECONDS = 1.0
+
+# Some reverse proxies (notably SageMaker Studio's jupyter-server-proxy, built
+# on Tornado) buffer a streaming `text/event-stream` response and only flush
+# to the client once an internal buffer fills. marimo's first event
+# (`kernel-ready`) is small (~600 bytes), so it can sit in that buffer forever
+# while the connection idles — the browser connects (HTTP 200) but renders a
+# blank page because it never receives the event. `X-Accel-Buffering: no` only
+# influences nginx, not Tornado. The fix is to (1) send a large comment
+# preamble as the very first bytes so the proxy's buffer spills immediately,
+# and (2) emit a periodic comment keepalive so the stream keeps flowing. SSE
+# comment lines start with ':' and are ignored by EventSource, so they are
+# invisible to the application.
+SSE_PREAMBLE = ":" + (" " * 2048) + "\n\n"
+SSE_KEEPALIVE = ": keepalive\n\n"
 
 
 class ConnectionPool:
@@ -139,6 +155,10 @@ def create_proxy(
             # connection to a read-only kiosk view. We keep a single persistent
             # recv() task (recreating it would drop frames) and wake up on a
             # short timeout to check request.is_disconnected().
+            # Force the buffering proxy to spill immediately so the first real
+            # event (marimo's kernel-ready) reaches the browser without waiting
+            # for more bytes.
+            yield SSE_PREAMBLE
             recv_task = asyncio.ensure_future(ws.recv())
             try:
                 while True:
@@ -150,6 +170,9 @@ def create_proxy(
                         if await request.is_disconnected():
                             logger.info("Client disconnected for %s", shim_id)
                             break
+                        # Still connected but idle: emit a keepalive so the
+                        # stream keeps flowing (and any buffered bytes flush).
+                        yield SSE_KEEPALIVE
                         continue
                     message = recv_task.result()
                     recv_task = asyncio.ensure_future(ws.recv())

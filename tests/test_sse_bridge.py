@@ -21,6 +21,11 @@ async def _read_one_event(lines, timeout: float = 5.0) -> str:
 
     ``lines`` must be a single ``resp.aiter_lines()`` iterator reused across
     calls — creating a fresh one per call would re-stream the consumed body.
+
+    Comment-only frames (every line starts with ':', e.g. the anti-buffering
+    preamble and keepalives) are skipped — they are ignored by EventSource and
+    carry no application data, so callers asserting on real events shouldn't
+    see them.
     """
 
     async def _pump():
@@ -28,7 +33,13 @@ async def _read_one_event(lines, timeout: float = 5.0) -> str:
         async for line in lines:
             if line == "":
                 # Blank line terminates the event.
-                return buf
+                if buf and not all(
+                    ln.startswith(":") for ln in buf.splitlines()
+                ):
+                    return buf
+                # Comment-only frame (preamble/keepalive) — skip and continue.
+                buf = ""
+                continue
             buf += line + "\n"
         return buf
 
@@ -51,6 +62,26 @@ async def test_send_without_connection_returns_404(live_stack):
             content=b"hi",
         )
     assert resp.status_code == 404
+
+
+async def test_sse_starts_with_flush_preamble(live_stack):
+    # The stream must begin with a large SSE comment preamble so a buffering
+    # intermediary (e.g. SageMaker's jupyter-server-proxy) flushes immediately
+    # and the first real event isn't stranded in its buffer. The preamble is a
+    # comment line (starts with ':') and must be big enough to exceed a typical
+    # proxy buffer threshold.
+    proxy_base, _ = live_stack
+    async with httpx.AsyncClient(timeout=10.0) as c:
+        async with c.stream(
+            "GET",
+            f"{proxy_base}/__wss/events",
+            params={"__wss_id": "test-preamble", "__wss_path": "/ws"},
+        ) as sse:
+            assert sse.status_code == 200
+            lines = sse.aiter_lines()
+            first = await asyncio.wait_for(anext(lines), timeout=5.0)
+    assert first.startswith(":")
+    assert len(first) >= 2000
 
 
 async def test_text_roundtrip_through_sse(live_stack):
