@@ -249,6 +249,30 @@ async def test_ws_route_decodes_smuggled_query(live_stack):
     assert parsed.get("file") == ["nb.py"]
 
 
+async def test_ws_route_unescapes_html_entities_in_query(live_stack):
+    # Observed on SageMaker: the smuggled query arrives with '&' HTML-escaped as
+    # '&amp;', which turns "session_id" into a bogus "amp;session_id" param and
+    # 403s marimo. The proxy must HTML-unescape so the target sees real '&'
+    # separators. Echo target reports its received query as "qs:...".
+    import websockets as _ws
+
+    proxy_base, _ = live_stack
+    ws_base = proxy_base.replace("http://", "ws://")
+    # __wss_q payload with an escaped ampersand, exactly like the SageMaker case.
+    async with _ws.connect(
+        ws_base + "/ws/__wss_q/file%3Dnb.py%26amp%3Bsession_id%3Ds_abc123"
+    ) as ws:
+        report = await asyncio.wait_for(ws.recv(), timeout=5)
+    assert report.startswith("qs:")
+    from urllib.parse import parse_qs
+
+    parsed = parse_qs(report[len("qs:"):])
+    # Correct param name recovered (not "amp;session_id").
+    assert parsed.get("session_id") == ["s_abc123"]
+    assert parsed.get("file") == ["nb.py"]
+    assert "amp;session_id" not in parsed
+
+
 async def test_reopen_same_shim_id_closes_prior_ws(live_stack):
     # An EventSource reconnect hits /__wss/events again with the SAME __wss_id.
     # The pool must close the prior upstream WebSocket before opening the new

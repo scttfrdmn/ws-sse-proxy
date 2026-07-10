@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import html
 import logging
 from typing import Optional
 from urllib.parse import unquote, urlencode
@@ -273,6 +274,14 @@ def create_proxy(
             ws_path = ws_path[:idx] or "/"
             if not query:
                 query = unquote(encoded)
+
+        # A query string must never contain HTML entities. When the app's WS
+        # URL is built after the page HTML has been through an escaping step,
+        # the '&' separators can arrive as '&amp;' (observed on SageMaker),
+        # which turns "session_id" into a bogus "amp;session_id" param and makes
+        # marimo 403 the handshake. Unescape so the target sees real separators.
+        if query and "&amp;" in query:
+            query = html.unescape(query)
 
         target_url = f"{target_ws}{ws_path}"
         if query:
