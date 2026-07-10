@@ -23,7 +23,8 @@ import websockets.exceptions
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
-from starlette.routing import Route
+from starlette.routing import Route, WebSocketRoute
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from .shim_js import SHIM_SCRIPT
 
@@ -238,6 +239,87 @@ def create_proxy(
             await pool.close(shim_id)
         return Response("OK", status_code=200)
 
+    async def websocket_proxy(client_ws: WebSocket) -> None:
+        """Bidirectionally proxy a browser WebSocket to the target over
+        localhost.
+
+        This is the preferred, zero-overhead path: where WebSocket upgrades
+        survive to this proxy (e.g. SageMaker Studio's jupyter-server-proxy,
+        which does forward WebSocket), the shim's native-WS attempt lands here
+        and we bridge full-duplex to the target. Terminating on localhost keeps
+        the target's cookie/origin intact (dodging marimo's 403) while giving
+        the browser a real WebSocket — no SSE fallback, so nothing for a
+        streaming-buffering proxy to hold back. The SSE/POST endpoints remain
+        as a fallback for environments that genuinely block WebSocket.
+        """
+        # Preserve the app-relative path and query string the browser used.
+        # Starlette gives us the full mounted path; the shim connects to the
+        # proxy at the same sub-path prefix as the target's real WS endpoint,
+        # so forwarding path + query verbatim reaches the right target route.
+        ws_path = client_ws.url.path
+        query = client_ws.url.query
+        target_url = f"{target_ws}{ws_path}"
+        if query:
+            target_url += f"?{query}"
+
+        await client_ws.accept()
+
+        try:
+            upstream = await websockets.asyncio.client.connect(
+                target_url,
+                additional_headers={"Origin": "http://localhost"},
+                max_size=None,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error("WS proxy: failed to connect upstream %s: %s",
+                         target_url, e)
+            await client_ws.close(code=1011)
+            return
+
+        logger.info("WS proxy: bridged to %s", target_url)
+
+        async def browser_to_target() -> None:
+            try:
+                while True:
+                    msg = await client_ws.receive()
+                    if msg["type"] == "websocket.disconnect":
+                        break
+                    if msg.get("text") is not None:
+                        await upstream.send(msg["text"])
+                    elif msg.get("bytes") is not None:
+                        await upstream.send(msg["bytes"])
+            except (WebSocketDisconnect, RuntimeError):
+                pass
+            finally:
+                await upstream.close()
+
+        async def target_to_browser() -> None:
+            try:
+                async for message in upstream:
+                    if isinstance(message, bytes):
+                        await client_ws.send_bytes(message)
+                    else:
+                        await client_ws.send_text(message)
+            except websockets.exceptions.ConnectionClosed:
+                pass
+            finally:
+                try:
+                    await client_ws.close()
+                except RuntimeError:
+                    pass
+
+        # Run both directions until either side closes, then cancel the other.
+        t1 = asyncio.ensure_future(browser_to_target())
+        t2 = asyncio.ensure_future(target_to_browser())
+        try:
+            await asyncio.wait(
+                {t1, t2}, return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            for t in (t1, t2):
+                t.cancel()
+            await upstream.close()
+
     async def proxy_handler(request: Request) -> Response:
         """Reverse-proxy all other requests, injecting JS shim into HTML."""
         path = request.url.path
@@ -308,6 +390,11 @@ def create_proxy(
         Route("/__wss/events", sse_endpoint),
         Route("/__wss/send", send_endpoint, methods=["POST"]),
         Route("/__wss/close", close_endpoint, methods=["POST"]),
+        # Bridge any WebSocket upgrade straight through to the target. This is
+        # the preferred path; the SSE/POST endpoints above are the fallback for
+        # environments that block WebSocket. Matches any path so it's
+        # app-agnostic.
+        WebSocketRoute("/{path:path}", websocket_proxy),
         Route(
             "/{path:path}",
             proxy_handler,

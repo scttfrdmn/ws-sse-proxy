@@ -10,7 +10,7 @@ The shim is completely transparent to the application — it implements
 the full WebSocket API interface.
 """
 
-SHIM_SCRIPT = """
+SHIM_SCRIPT = r"""
 <script>
 (function() {
   const OriginalWebSocket = window.WebSocket;
@@ -29,31 +29,43 @@ SHIM_SCRIPT = """
       const wsUrl = new URL(url, window.location.origin);
       this._queryString = wsUrl.search;
 
-      // Derive the mount prefix (base path) so the /__wss/* endpoints resolve
-      // correctly even when the app is served under a sub-path prefix
-      // (jupyter-server-proxy, JupyterHub, SageMaker Studio, etc.). The page
-      // and its WebSocket share that prefix, so the longest common path-segment
-      // prefix of the two IS the mount. Stripping it from the WS path yields
-      // the app-relative path the proxy needs as __wss_path.
-      //   page: /jupyterlab/default/proxy/2719/     ws: /jupyterlab/.../2719/ws
-      //   -> base = /jupyterlab/default/proxy/2719   targetWsPath = /ws
-      // At the server root, base is '' and targetWsPath is the WS path as-is.
-      const pageSegs = window.location.pathname.split('/');
-      const wsSegs = wsUrl.pathname.split('/');
-      const max = Math.min(pageSegs.length, wsSegs.length);
-      const common = [];
-      for (let i = 0; i < max && pageSegs[i] === wsSegs[i]; i++) {
-        common.push(pageSegs[i]);
+      // Derive the mount prefix (base path) under which the page is served, so
+      // both the native WebSocket and the /__wss/* fallback endpoints resolve
+      // correctly when the app is behind a sub-path prefix (jupyter-server-
+      // proxy, JupyterHub, SageMaker Studio, etc.).
+      //
+      // We must NOT trust the host/prefix in the app's WS URL: some apps
+      // (e.g. marimo with no --base-url) build it from an empty base, yielding
+      // a root URL like wss://host/ws that ignores the mount prefix entirely.
+      // Through a sub-path proxy that URL never reaches the app (→ 1006). The
+      // reliable prefix is the PAGE's own directory: everything up to and
+      // including the last '/' of window.location.pathname.
+      //   page /jupyterlab/default/proxy/2719/  -> base /jupyterlab/default/proxy/2719
+      //   page /                                -> base ''
+      const pagePath = window.location.pathname;
+      this._shimBasePath = pagePath.replace(/\/[^/]*$/, '');
+
+      // The app-relative WS path is the app's WS pathname with any leading
+      // prefix it happens to share with the page stripped, so double-prefixing
+      // (e.g. a base-url that already includes the mount) collapses correctly.
+      let appWsPath = wsUrl.pathname;
+      if (this._shimBasePath && appWsPath.startsWith(this._shimBasePath)) {
+        appWsPath = appWsPath.slice(this._shimBasePath.length);
       }
-      this._shimBasePath = common.join('/');
-      this._targetWsPath =
-        wsUrl.pathname.slice(this._shimBasePath.length) || '/';
+      this._targetWsPath = appWsPath || '/';
+
+      // The corrected native WebSocket URL: page origin + mount prefix + the
+      // app-relative WS path + original query. This is what the browser should
+      // actually dial, regardless of what host/prefix the app put in `url`.
+      const wsScheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      this._nativeWsUrl = `${wsScheme}//${window.location.host}` +
+        `${this._shimBasePath}${this._targetWsPath}${this._queryString}`;
 
       // Generate a unique ID for this connection
       this._shimId = crypto.randomUUID();
 
       // Try real WebSocket first, fall back to SSE if it fails
-      this._tryRealWebSocket(url, protocols);
+      this._tryRealWebSocket(this._nativeWsUrl, protocols);
     }
 
     _tryRealWebSocket(url, protocols) {

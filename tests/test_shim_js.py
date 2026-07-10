@@ -37,7 +37,12 @@ def _run_shim(page_path: str, ws_url: str) -> dict:
         // --- minimal browser global stubs ---
         const _unloadHandlers = {};
         globalThis.window = {
-          location: { pathname: %(page_path)s, origin: 'https://host.example' },
+          location: {
+            pathname: %(page_path)s,
+            origin: 'https://host.example',
+            host: 'host.example',
+            protocol: 'https:',
+          },
           addEventListener(type, fn) { _unloadHandlers[type] = fn; },
           removeEventListener(type, fn) {
             if (_unloadHandlers[type] === fn) delete _unloadHandlers[type];
@@ -53,7 +58,7 @@ def _run_shim(page_path: str, ws_url: str) -> dict:
         // match on a UUID-shaped value rather than a fixed string.
         // A WebSocket that immediately triggers the 1006 fallback path.
         globalThis.WebSocket = class {
-          constructor(u) { this.readyState = 0;
+          constructor(u) { captured.nativeWsUrl = u; this.readyState = 0;
             setTimeout(() => { this.readyState = 3;
               if (this.onclose) this.onclose({ code: 1006, reason: '', wasClean: false });
             }, 0);
@@ -62,6 +67,9 @@ def _run_shim(page_path: str, ws_url: str) -> dict:
         };
         globalThis.WebSocket.CONNECTING = 0; globalThis.WebSocket.OPEN = 1;
         globalThis.WebSocket.CLOSING = 2; globalThis.WebSocket.CLOSED = 3;
+        // The shim captures OriginalWebSocket = window.WebSocket; in a real
+        // browser window === globalThis, so mirror the stub onto window.
+        globalThis.window.WebSocket = globalThis.WebSocket;
         globalThis.EventSource = class {
           constructor(url) { captured.sseUrl = url; this.readyState = 0; }
           addEventListener() {} close() {}
@@ -145,6 +153,29 @@ def test_subpath_mount_urls_regression():
         "wss://host.example" + prefix + "/ws?session_id=abc",
     )
     _assert_urls(cap, prefix)
+
+
+def test_native_ws_url_rewritten_onto_page_prefix():
+    # The native WebSocket attempt must target the PAGE's mount prefix, not the
+    # host/prefix the app baked into its WS URL. marimo with no --base-url
+    # builds a ROOT url (wss://host/ws) that ignores the sub-path mount; through
+    # a sub-path proxy that never reaches the app (→ 1006). The shim must
+    # rewrite it onto the page prefix so the native attempt actually connects.
+    prefix = "/jupyterlab/default/proxy/2719"
+    cap = _run_shim(
+        prefix + "/",
+        "wss://host.example/ws?session_id=abc",  # ROOT url, wrong prefix
+    )
+    # Native WS is dialed at the page's prefix, preserving the query.
+    assert cap["nativeWsUrl"] == (
+        "wss://host.example" + prefix + "/ws?session_id=abc"
+    )
+
+
+def test_native_ws_url_root_mount():
+    # At the server root the native URL is unchanged.
+    cap = _run_shim("/", "wss://host.example/ws?session_id=abc")
+    assert cap["nativeWsUrl"] == "wss://host.example/ws?session_id=abc"
 
 
 def test_close_on_unload_beacon():
