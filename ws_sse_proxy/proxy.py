@@ -11,6 +11,7 @@ any other WebSocket-dependent app will work.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from typing import Optional
@@ -28,6 +29,12 @@ from .shim_js import SHIM_SCRIPT
 
 logger = logging.getLogger("ws_sse_proxy")
 
+# How often to wake up while waiting for the next upstream frame to check
+# whether the browser has disconnected. Small enough to tear the upstream
+# session down promptly (so a reload isn't demoted to kiosk), large enough
+# to avoid a busy loop on an idle connection.
+DISCONNECT_POLL_SECONDS = 1.0
+
 
 class ConnectionPool:
     """Manages active WebSocket connections keyed by shim ID."""
@@ -40,6 +47,14 @@ class ConnectionPool:
     async def open(
         self, shim_id: str, ws_url: str
     ) -> websockets.asyncio.client.ClientConnection:
+        # Close any prior connection for this shim_id before opening a new one.
+        # An EventSource reconnect (e.g. the browser retrying a buffered/stalled
+        # SSE stream) hits the SSE endpoint again with the same __wss_id; without
+        # this, the previous upstream WebSocket would be orphaned — dropped from
+        # the dict but left OPEN. For single-editor apps like marimo, a lingering
+        # OPEN session keeps the "editor" role and demotes the reconnecting
+        # client to read-only (kiosk), rendering a blank notebook.
+        await self.close(shim_id)
         ws = await websockets.asyncio.client.connect(
             ws_url,
             additional_headers={"Origin": "http://localhost"},
@@ -114,8 +129,30 @@ def create_proxy(
             )
 
         async def event_generator():
+            # Forward each upstream WebSocket frame, but also poll for client
+            # disconnect while parked waiting for the next frame. Without this,
+            # when the SSE response is buffered by an intermediary (e.g.
+            # SageMaker's jupyter-server-proxy) the server never observes the
+            # browser going away: the generator blocks awaiting the next frame,
+            # so the `finally` (and thus pool.close) never runs and the upstream
+            # session leaks in the OPEN state — which is what demotes the next
+            # connection to a read-only kiosk view. We keep a single persistent
+            # recv() task (recreating it would drop frames) and wake up on a
+            # short timeout to check request.is_disconnected().
+            recv_task = asyncio.ensure_future(ws.recv())
             try:
-                async for message in ws:
+                while True:
+                    done, _ = await asyncio.wait(
+                        {recv_task}, timeout=DISCONNECT_POLL_SECONDS
+                    )
+                    if recv_task not in done:
+                        # Timed out waiting for a frame; check for disconnect.
+                        if await request.is_disconnected():
+                            logger.info("Client disconnected for %s", shim_id)
+                            break
+                        continue
+                    message = recv_task.result()
+                    recv_task = asyncio.ensure_future(ws.recv())
                     if isinstance(message, bytes):
                         encoded = base64.b64encode(message).decode("ascii")
                         yield f"event: binary\ndata: {encoded}\n\n"
@@ -129,6 +166,7 @@ def create_proxy(
                 logger.error("SSE bridge error: %s", e)
                 yield f"event: error\ndata: {e}\n\n"
             finally:
+                recv_task.cancel()
                 await pool.close(shim_id)
 
         return StreamingResponse(

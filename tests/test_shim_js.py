@@ -35,9 +35,20 @@ def _run_shim(page_path: str, ws_url: str) -> dict:
         """
         const captured = {};
         // --- minimal browser global stubs ---
+        const _unloadHandlers = {};
         globalThis.window = {
           location: { pathname: %(page_path)s, origin: 'https://host.example' },
+          addEventListener(type, fn) { _unloadHandlers[type] = fn; },
+          removeEventListener(type, fn) {
+            if (_unloadHandlers[type] === fn) delete _unloadHandlers[type];
+          },
         };
+        // navigator is a read-only global in modern Node; override its
+        // sendBeacon rather than reassigning the whole object.
+        Object.defineProperty(globalThis, 'navigator', {
+          value: { sendBeacon(url) { captured.beaconUrl = url; return true; } },
+          configurable: true,
+        });
         // crypto.randomUUID is a native Node global; the assertions below
         // match on a UUID-shaped value rather than a fixed string.
         // A WebSocket that immediately triggers the 1006 fallback path.
@@ -81,7 +92,12 @@ def _run_shim(page_path: str, ws_url: str) -> dict:
         const ws = new window.WebSocket(%(ws_url)s);
         setTimeout(() => {           // let the 1006 fallback fire -> _startSSE
           ws.send('hello');          // exercise the send URL
+          // Fire a page-unload BEFORE close() so the sendBeacon path runs
+          // while the SSE connection is still active (the reload scenario).
+          if (_unloadHandlers.pagehide) _unloadHandlers.pagehide();
+          captured.unloadHandlerRegistered = !!_unloadHandlers.pagehide;
           ws.close();                // exercise the close URL
+          captured.unloadHandlerCleared = !_unloadHandlers.pagehide;
           console.log(JSON.stringify(captured));
         }, 20);
         """
@@ -129,3 +145,23 @@ def test_subpath_mount_urls_regression():
         "wss://host.example" + prefix + "/ws?session_id=abc",
     )
     _assert_urls(cap, prefix)
+
+
+def test_close_on_unload_beacon():
+    # On page unload (reload/navigation) the shim must sendBeacon a close for
+    # its __wss_id, so the upstream session is torn down before the reloaded
+    # page connects with a new session id. Without this, marimo demotes the
+    # reconnecting page to a read-only kiosk view (blank notebook).
+    prefix = "/jupyterlab/default/proxy/2719"
+    cap = _run_shim(
+        prefix + "/",
+        "wss://host.example" + prefix + "/ws?session_id=abc",
+    )
+    assert cap["unloadHandlerRegistered"] is True
+    assert cap["beaconUrl"].startswith(prefix + "/__wss/close?__wss_id=")
+    # The beacon and the explicit close() must target the same shim id.
+    beacon_id = cap["beaconUrl"].split("__wss_id=")[1]
+    close_id = cap["closeUrl"].split("__wss_id=")[1]
+    assert beacon_id == close_id
+    # close() must unregister the handler to avoid leaking listeners.
+    assert cap["unloadHandlerCleared"] is True

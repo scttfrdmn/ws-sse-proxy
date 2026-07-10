@@ -123,6 +123,27 @@ SHIM_SCRIPT = """
       const sep = this._queryString ? '&' : '?';
       const sseUrl = `${this._shimBasePath}/__wss/events${this._queryString}${sep}__wss_id=${this._shimId}&__wss_path=${encodeURIComponent(this._targetWsPath)}`;
 
+      // Tear down the upstream WebSocket when the page goes away (reload, tab
+      // close, navigation). A normal fetch() is cancelled by the navigation
+      // before it is sent, so we use sendBeacon, which the browser guarantees
+      // to deliver during unload. This matters for single-editor apps like
+      // marimo: on reload the page generates a NEW session id and connects
+      // while the OLD session is still OPEN, which the server demotes to a
+      // read-only (kiosk) view — a blank notebook. Closing the old session
+      // first lets the reloaded page resume as the editor. Registered once per
+      // SSE-active connection; the handler no-ops after close() clears the id.
+      if (!this._unloadHandler && typeof window.addEventListener === 'function') {
+        this._unloadHandler = () => {
+          if (this._sseActive && this._shimId &&
+              typeof navigator !== 'undefined' && navigator.sendBeacon) {
+            navigator.sendBeacon(
+              `${this._shimBasePath}/__wss/close?__wss_id=${this._shimId}`
+            );
+          }
+        };
+        window.addEventListener('pagehide', this._unloadHandler);
+      }
+
       this._eventSource = new EventSource(sseUrl);
 
       this._eventSource.onopen = () => {
@@ -183,6 +204,10 @@ SHIM_SCRIPT = """
     }
 
     close(code, reason) {
+      if (this._unloadHandler) {
+        window.removeEventListener('pagehide', this._unloadHandler);
+        this._unloadHandler = null;
+      }
       if (this._eventSource) {
         this._eventSource.close();
       }

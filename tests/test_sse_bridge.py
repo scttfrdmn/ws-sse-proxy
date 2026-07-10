@@ -193,3 +193,31 @@ async def test_close_endpoint_is_idempotent(live_stack):
         # And with no id at all.
         resp2 = await c.post(f"{proxy_base}/__wss/close")
         assert resp2.status_code == 200
+
+
+async def test_reopen_same_shim_id_closes_prior_ws(live_stack):
+    # An EventSource reconnect hits /__wss/events again with the SAME __wss_id.
+    # The pool must close the prior upstream WebSocket before opening the new
+    # one, otherwise the old socket is orphaned (dropped from the dict but left
+    # OPEN). For single-editor apps like marimo, a lingering OPEN session keeps
+    # the "editor" role and demotes the next page load to a read-only kiosk
+    # (blank notebook). We assert the pool only ever tracks one live socket per
+    # id, and that the new stream is fully functional (round-trips a frame).
+    from ws_sse_proxy.proxy import ConnectionPool
+
+    _, target_base = live_stack
+    target_ws = target_base.replace("http://", "ws://") + "/ws"
+
+    pool = ConnectionPool()
+    ws1 = await pool.open("same-id", target_ws)
+    ws2 = await pool.open("same-id", target_ws)
+    await asyncio.sleep(0.2)
+
+    assert ws1 is not ws2
+    assert ws2.state.name == "OPEN"
+    # Prior socket was closed by the close-before-open in pool.open().
+    assert ws1.state.name in ("CLOSING", "CLOSED")
+    # Only the latest socket is tracked.
+    assert pool.get("same-id") is ws2
+
+    await pool.close("same-id")
