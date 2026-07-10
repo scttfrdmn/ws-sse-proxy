@@ -15,7 +15,7 @@ import asyncio
 import base64
 import logging
 from typing import Optional
-from urllib.parse import urlencode
+from urllib.parse import unquote, urlencode
 
 import httpx
 import websockets.asyncio.client
@@ -258,9 +258,30 @@ def create_proxy(
         # so forwarding path + query verbatim reaches the right target route.
         ws_path = client_ws.url.path
         query = client_ws.url.query
+
+        # The shim smuggles the WS query as a trailing path segment
+        #   <ws-path>/__wss_q/<uri-encoded-query>
+        # because some proxies (SageMaker Studio's jupyter-server-proxy) strip
+        # the query string on the WebSocket upgrade. Decode it back into a real
+        # query here, so the target (e.g. marimo, which 403s on /ws without
+        # session_id) receives the params it needs. A real ?query, if present
+        # and not stripped, takes precedence.
+        marker = "/__wss_q/"
+        idx = ws_path.find(marker)
+        if idx != -1:
+            encoded = ws_path[idx + len(marker):]
+            ws_path = ws_path[:idx] or "/"
+            if not query:
+                query = unquote(encoded)
+
         target_url = f"{target_ws}{ws_path}"
         if query:
             target_url += f"?{query}"
+
+        logger.info(
+            "WS proxy: incoming path=%r query=%r -> target=%r",
+            client_ws.url.path, query, target_url,
+        )
 
         await client_ws.accept()
 

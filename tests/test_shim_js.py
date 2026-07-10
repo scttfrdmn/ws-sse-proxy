@@ -160,22 +160,24 @@ def test_native_ws_url_rewritten_onto_page_prefix():
     # host/prefix the app baked into its WS URL. marimo with no --base-url
     # builds a ROOT url (wss://host/ws) that ignores the sub-path mount; through
     # a sub-path proxy that never reaches the app (→ 1006). The shim must
-    # rewrite it onto the page prefix so the native attempt actually connects.
+    # rewrite it onto the page prefix. The query is smuggled as a path segment
+    # (__wss_q) because SageMaker's proxy strips the query on WS upgrades.
     prefix = "/jupyterlab/default/proxy/2719"
     cap = _run_shim(
         prefix + "/",
         "wss://host.example/ws?session_id=abc",  # ROOT url, wrong prefix
     )
-    # Native WS is dialed at the page's prefix, preserving the query.
     assert cap["nativeWsUrl"] == (
-        "wss://host.example" + prefix + "/ws?session_id=abc"
+        "wss://host.example" + prefix + "/ws/__wss_q/session_id%3Dabc"
     )
 
 
 def test_native_ws_url_root_mount():
-    # At the server root the native URL is unchanged.
+    # At the server root the native URL keeps the path but smuggles the query.
     cap = _run_shim("/", "wss://host.example/ws?session_id=abc")
-    assert cap["nativeWsUrl"] == "wss://host.example/ws?session_id=abc"
+    assert cap["nativeWsUrl"] == (
+        "wss://host.example/ws/__wss_q/session_id%3Dabc"
+    )
 
 
 def test_close_on_unload_beacon():

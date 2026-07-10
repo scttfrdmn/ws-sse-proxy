@@ -226,6 +226,29 @@ async def test_close_endpoint_is_idempotent(live_stack):
         assert resp2.status_code == 200
 
 
+async def test_ws_route_decodes_smuggled_query(live_stack):
+    # The shim smuggles the WS query as a /__wss_q/<encoded> path segment
+    # because SageMaker's proxy strips the query on WS upgrades. The proxy's
+    # WebSocket route must decode it back into a real query so the target
+    # receives its params (marimo 403s on /ws without session_id). The echo
+    # target reports its received query string as the first frame ("qs:...").
+    import websockets as _ws
+
+    proxy_base, _ = live_stack
+    ws_base = proxy_base.replace("http://", "ws://")
+    async with _ws.connect(
+        ws_base + "/ws/__wss_q/session_id%3Ds_abc123%26file%3Dnb.py"
+    ) as ws:
+        report = await asyncio.wait_for(ws.recv(), timeout=5)
+    assert report.startswith("qs:")
+    qs = report[len("qs:"):]
+    from urllib.parse import parse_qs
+
+    parsed = parse_qs(qs)
+    assert parsed.get("session_id") == ["s_abc123"]
+    assert parsed.get("file") == ["nb.py"]
+
+
 async def test_reopen_same_shim_id_closes_prior_ws(live_stack):
     # An EventSource reconnect hits /__wss/events again with the SAME __wss_id.
     # The pool must close the prior upstream WebSocket before opening the new

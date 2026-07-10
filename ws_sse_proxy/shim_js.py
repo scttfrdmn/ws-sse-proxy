@@ -55,11 +55,27 @@ SHIM_SCRIPT = r"""
       this._targetWsPath = appWsPath || '/';
 
       // The corrected native WebSocket URL: page origin + mount prefix + the
-      // app-relative WS path + original query. This is what the browser should
-      // actually dial, regardless of what host/prefix the app put in `url`.
+      // app-relative WS path. This is what the browser should actually dial,
+      // regardless of what host/prefix the app put in `url`.
+      //
+      // The query string is NOT appended as a normal ?query: some proxies
+      // (notably SageMaker Studio's jupyter-server-proxy) STRIP the query
+      // string on the WebSocket upgrade — verified: the browser sends
+      // /ws?session_id=..., the target receives /ws with no query. Apps that
+      // require a query param on /ws (marimo needs session_id or it 403s) then
+      // fail. So we smuggle the query as an extra PATH segment, which proxies
+      // preserve: <ws-path>/__wss_q/<uri-encoded-query>. ws-sse-proxy's
+      // WebSocket route decodes it back into a real query before dialing the
+      // target. The native attempt therefore survives a query-stripping proxy.
       const wsScheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      this._nativeWsUrl = `${wsScheme}//${window.location.host}` +
-        `${this._shimBasePath}${this._targetWsPath}${this._queryString}`;
+      let nativePath = `${this._shimBasePath}${this._targetWsPath}`;
+      if (this._queryString) {
+        const q = this._queryString.replace(/^\?/, '');
+        nativePath = nativePath.replace(/\/$/, '') +
+          '/__wss_q/' + encodeURIComponent(q);
+      }
+      this._nativeWsUrl =
+        `${wsScheme}//${window.location.host}${nativePath}`;
 
       // Generate a unique ID for this connection
       this._shimId = crypto.randomUUID();
